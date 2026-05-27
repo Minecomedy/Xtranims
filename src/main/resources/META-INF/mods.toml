@@ -1,0 +1,34 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MIT"
+
+[[mods]]
+    modId="xtranims"
+    version="${file.jarVersion}"
+    displayName="XtraNimations"
+    description='''
+Adds extra animation triggers to Customizable Player Models (CPM).
+Triggers: moon phases, potion effects, inventory items, biome colors.
+Authors: Minecomedy, Claude
+'''
+
+[[dependencies.xtranims]]
+    modId="forge"
+    mandatory=true
+    versionRange="[47,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.xtranims]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[1.20.1,1.21)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.xtranims]]
+    modId="cpm"
+    mandatory=true
+    versionRange="[0.6,)"
+    ordering="AFTER"
+    side="BOTH"
