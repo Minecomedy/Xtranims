@@ -601,13 +601,6 @@ if (XtraConfig.DEBUG) XtraNimations.LOGGER.debug("[XtraNimations] RGB propagate:
             for (int ci = 0; ci < numComponents; ci++) {
                 final com.tom.cpm.shared.animation.IModelComponent realCube =
                     (com.tom.cpm.shared.animation.IModelComponent) cubes.get(ci);
-                // Track the last forwarded color per proxy so setColor() is only
-                // forwarded when the value actually changes. Without this guard,
-                // CPM's AnimationEngine calls setColor every render frame even when
-                // the color is constant, which marks the cube dirty every frame and
-                // causes createBox to be called every frame. createBox then hits
-                // PerFaceUV$Face.rotation == null on standard-UV cubes → NPE crash.
-                final float[] lastColor = { -1f, -1f, -1f };
                 components[ci] = new com.tom.cpm.shared.animation.IModelComponent() {
                     @Override public void setPosition(boolean add, float x, float y, float z) {}
                     @Override public void setRotation(boolean add, float x, float y, float z) {}
@@ -619,14 +612,7 @@ if (XtraConfig.DEBUG) XtraNimations.LOGGER.debug("[XtraNimations] RGB propagate:
                     @Override public com.tom.cpl.math.Vec3f getRenderScale() { return realCube.getRenderScale(); }
                     @Override public boolean isVisible() { return realCube.isVisible(); }
                     @Override public int getRGB() { return realCube.getRGB(); }
-                    @Override public void setColor(float r2, float g2, float b2) {
-                        if (r2 != lastColor[0] || g2 != lastColor[1] || b2 != lastColor[2]) {
-                            lastColor[0] = r2;
-                            lastColor[1] = g2;
-                            lastColor[2] = b2;
-                            realCube.setColor(r2, g2, b2);
-                        }
-                    }
+                    @Override public void setColor(float r2, float g2, float b2) { realCube.setColor(r2, g2, b2); }
                 };
             }
 
