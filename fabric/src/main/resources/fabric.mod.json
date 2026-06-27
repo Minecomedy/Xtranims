@@ -1,0 +1,31 @@
+{
+    "schemaVersion": 1,
+    "id": "xtranims",
+    "version": "${version}",
+    "name": "${mod_name}",
+    "description": "${description}",
+    "authors": ["${mod_author}"],
+    "license": "${license}",
+    "environment": "*",
+    "entrypoints": {
+        "main": [
+            "com.minecomedy.xtranims.fabric.XtraNimationsFabric"
+        ],
+        "client": [
+            "com.minecomedy.xtranims.fabric.XtraNimationsFabric\$ClientEntry"
+        ],
+        "server": [
+            "com.minecomedy.xtranims.fabric.XtraNimationsFabric\$ServerEntry"
+        ],
+        "cpmapi": [
+            "com.minecomedy.xtranims.CPMPlugin"
+        ]
+    },
+    "depends": {
+        "fabricloader": ">=${fabric_loader_version}",
+        "fabric": "*",
+        "minecraft": "${minecraft_version}",
+        "java": ">=${java_version}",
+        "cpm": "*"
+    }
+}

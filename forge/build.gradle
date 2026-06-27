@@ -1,0 +1,55 @@
+plugins {
+    id 'multiloader-loader'
+    id 'net.neoforged.moddev.legacyforge'
+}
+
+legacyForge {
+    version = "${minecraft_version}-${forge_version}"
+
+    validateAccessTransformers = true
+
+    def at = project(':common').file('src/main/resources/META-INF/accesstransformer.cfg')
+    if (at.exists()) {
+        accessTransformers = ["src/main/resources/META-INF/accesstransformer.cfg"]
+    }
+    parchment {
+        minecraftVersion = parchment_minecraft
+        mappingsVersion = parchment_version
+    }
+    runs {
+        client {
+            client()
+        }
+        server {
+            server()
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+dependencies {
+    // project(':common') is already added by multiloader-loader.gradle via capability;
+    // don't add it again here — only add things multiloader-loader doesn't cover.
+    // CPM Forge jar — place in forge/run/mods/ for both compile and runtime
+    compileOnly fileTree(dir: 'run/mods', include: ['CustomPlayerModels-Forge-*.jar', 'CustomPlayerModels-*.jar'])
+}
+
+// REQUIRED: reobfuscates the jar from Mojang/Parchment names back to SRG names
+// so Forge can load it. Without this the jar builds but crashes at runtime.
+jar {
+    finalizedBy('reobfJar')
+}
+
+// UTF-8 for Windows compatibility (matches common/build.gradle)
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+tasks.withType(Javadoc).configureEach {
+    options.encoding = 'UTF-8'
+    options.charSet  = 'UTF-8'
+}
