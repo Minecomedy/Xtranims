@@ -1,7 +1,5 @@
 package com.minecomedy.xtranims;
 
-import net.minecraftforge.fml.loading.FMLPaths;
-
 import java.io.IOException;
 import java.nio.file.*;
 import java.util.*;
@@ -28,6 +26,11 @@ import java.util.*;
  *
  * All other classes should call XtraConfig.configDir() / animationsDir() /
  * colorsDir() instead of building paths themselves.
+ *
+ * PORTING NOTE: the only change from the Forge-only version is that
+ * FMLPaths.CONFIGDIR.get() is replaced with XtraPlatform.INSTANCE.gameConfigDir(),
+ * which each loader module resolves to its own equivalent
+ * (FMLPaths on Forge, FabricLoader#getConfigDir() on Fabric).
  */
 public class XtraConfig {
 
@@ -40,7 +43,7 @@ public class XtraConfig {
 
     /** Root config folder: .minecraft/config/xtranims/ */
     public static Path configDir() {
-        return FMLPaths.CONFIGDIR.get().resolve("xtranims");
+        return XtraPlatform.INSTANCE.gameConfigDir().resolve("xtranims");
     }
 
     /** Subfolder for NBT item animation files: config/xtranims/animations/ */

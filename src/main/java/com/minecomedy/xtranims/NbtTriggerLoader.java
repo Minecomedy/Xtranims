@@ -3,8 +3,7 @@ package com.minecomedy.xtranims;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
-import net.minecraftforge.registries.ForgeRegistries;
-import net.minecraftforge.fml.loading.FMLPaths;
+import net.minecraft.core.registries.BuiltInRegistries;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -242,13 +241,13 @@ public class NbtTriggerLoader {
 
                 if (key.equals("item")) {
                     ResourceLocation rl = ResourceLocation.tryParse(val);
-                    if (rl == null || !ForgeRegistries.ITEMS.containsKey(rl)) {
+                    if (rl == null || !BuiltInRegistries.ITEM.containsKey(rl)) {
                         XtraNimations.LOGGER.warn(
                             "[XtraNimations] {} line {}: unknown item '{}' — skipping file",
                             filename, lineNum, val);
                         return null;
                     }
-                    item = ForgeRegistries.ITEMS.getValue(rl);
+                    item = BuiltInRegistries.ITEM.get(rl);
                     continue;
                 }
 
@@ -278,7 +277,7 @@ public class NbtTriggerLoader {
 
         XtraNimations.LOGGER.info(
             "[XtraNimations] '{}': item={}, hand={}, conditions={}",
-            animName, ForgeRegistries.ITEMS.getKey(item), hand, conditions.size());
+            animName, BuiltInRegistries.ITEM.getKey(item), hand, conditions.size());
         return new ItemAnimation(animName, item, hand, conditions);
     }
 

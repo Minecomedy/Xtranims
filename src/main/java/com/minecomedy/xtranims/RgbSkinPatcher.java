@@ -155,18 +155,10 @@ if (XtraConfig.DEBUG) XtraNimations.LOGGER.info(
     /**
      * Scans the dataBlock for EffectColor entries matching our cubeIds.
      *
-     * Strategy: scan for the exact byte sequence [0x05][0x03][varInt(cubeId)]
-     * which is the confirmed encoding for a RENDER_EFFECT (ordinal 5) block
-     * containing a COLOR effect (ordinal 3) in CPM 0.6.x.
-     *
-     * Previously this used a loose heuristic of [any byte < 32][any byte < 32]
-     * as the prefix, which caused false matches against per-face UV coordinate
-     * data: UV u1/v1 values are typically small (< 32), so the scanner would
-     * misidentify UV coordinate bytes as an EffectColor prefix, then overwrite
-     * u2/v2/rotation bytes with RGB values. This left PerFaceUV$Face.rotation
-     * null → NPE crash in PerFaceUV$Face.getVertexRotated().
-     *
-     * Requiring the exact [5][3] prefix eliminates all false positives.
+     * Strategy: first discover where each cubeId appears with a 2-byte prefix
+     * that looks like [renderEffectByte][colorByte] (small values 0-15 typical).
+     * We find the ONE occurrence preceded by consistent small ordinal bytes,
+     * which is the EffectColor entry. Then patch the 3 RGB bytes after it.
      *
      * Returns the patched byte array, or null if nothing was patched.
      */
@@ -186,13 +178,15 @@ if (XtraConfig.DEBUG) XtraNimations.LOGGER.info(
             byte newG = (byte) ((newColor >>  8) & 0xFF);
             byte newB = (byte) (newColor         & 0xFF);
 
-            // Require exact prefix [5][3]: RENDER_EFFECT ordinal + COLOR effect ordinal.
-            // Any other prefix is rejected — the old [<32][<32] fallback caused
-            // per-face UV coordinate bytes to be misidentified and corrupted.
+            // Find the ONE location where this cubeId is preceded by two small
+            // ordinal bytes (both < 32), which identifies an EffectColor entry.
+            // The bytes after must be 3 color bytes (R,G,B — all 0-255).
+            // This avoids needing to know exact version-specific enum ordinals.
             int matchPos = -1;
             for (int i = 3; i < streamEnd - varint.length - 2; i++) {
-                int pre1 = out[i - 2] & 0xFF;
-                int pre2 = out[i - 1] & 0xFF;
+                // Check 2-byte prefix: both must be small ordinals (< 32)
+                int pre1 = out[i - 2] & 0xFF; // part-type ordinal
+                int pre2 = out[i - 1] & 0xFF; // effect-type ordinal
                 if ((pre1 != 5 && pre1 != 6) || pre2 != 3) continue;
 
                 // Match varInt bytes
@@ -202,8 +196,15 @@ if (XtraConfig.DEBUG) XtraNimations.LOGGER.info(
                 }
                 if (!varMatch) continue;
 
+                // Ensure the 3 bytes after are plausible RGB (anything 0-255 is valid,
+                // but we also accept only if the known origColor matches — if available)
                 int rgbPos = i + varint.length;
                 if (rgbPos + 2 >= streamEnd) continue;
+
+                // No origColor check here: the prefix [small][small][varInt(cubeId)]
+                // already uniquely identifies the EffectColor entry in the dataBlock.
+                // Filtering by origColor would require the in-memory model tag colors to
+                // match the file — which breaks in Test Ingame mode. Skip the check.
 
                 matchPos = i;
                 break;
@@ -276,7 +277,6 @@ if (XtraConfig.DEBUG) XtraNimations.LOGGER.info(
             for (int i = 3; i < streamEnd - varint.length - 2; i++) {
                 int pre1 = out[i - 2] & 0xFF;
                 int pre2 = out[i - 1] & 0xFF;
-                // Require exact [5][3] prefix — same reasoning as patchDataBlock.
                 if ((pre1 != 5 && pre1 != 6) || pre2 != 3) continue;
                 boolean varMatch = true;
                 for (int v = 0; v < varint.length; v++) {

@@ -10,40 +10,40 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
+import net.minecraft.core.Holder;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.effect.MobEffect;
+import net.minecraft.world.item.component.CustomData;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.food.FoodData;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
 
 import java.util.*;
 import java.util.UUID;
 
 /**
- * XtraNimations — TriggerEventHandler
+ * XtraNimations — TriggerEventHandler (common, loader-agnostic)
  *
- * Performance design:
- *   - State diffing: each group of triggers tracks its own "last known state"
- *     and skips ALL work (including send()) when nothing changed.
- *   - Item checks: only re-evaluated when hotbar slot or item identity changes.
- *   - NBT checks: only run when the held item changes.
- *   - Biome/world: only re-evaluated when the player moves to a new block column
- *     or every 4 seconds as a safety net.
- *   - Moon/night: only re-evaluated when day-time crosses the night threshold.
- *   - Potions: only re-evaluated when the effect map size changes (gain/lose effect).
- *   - send() is only called when a value changes, so CPM API is touched minimally.
+ * All Forge event annotations removed. This class now exposes plain static
+ * methods that each platform's bridge class calls:
+ *
+ *   tick()                     ← Forge: TickEvent.ClientTickEvent (phase END)
+ *                                 Fabric: ClientTickEvents.END_CLIENT_TICK
+ *
+ *   onJoinServer()             ← Forge: ClientPlayerNetworkEvent.LoggingIn
+ *                                 Fabric: ClientPlayConnectionEvents.JOIN
+ *
+ *   onLeaveServer()            ← Forge: ClientPlayerNetworkEvent.LoggingOut
+ *                                 Fabric: ClientPlayConnectionEvents.DISCONNECT
+ *
+ *   onClientEntityUnload(UUID) ← Forge: EntityLeaveLevelEvent (player, client-side)
+ *                                 Fabric: ClientEntityEvents.ENTITY_UNLOAD (player)
+ *
+ * Performance design: unchanged from the original — state diffing, item
+ * identity checks, biome/world throttling, etc.
  */
-@Mod.EventBusSubscriber(
-    modid = XtraNimations.MOD_ID,
-    bus   = Mod.EventBusSubscriber.Bus.FORGE,
-    value = Dist.CLIENT
-)
 public class TriggerEventHandler {
 
     // ── Value cache: last sent value — skips CPM API when unchanged ───────────
@@ -61,7 +61,6 @@ public class TriggerEventHandler {
     private static ModelDefinition lastModelRef  = null;
     /** True after a relog/join — triggers one patchAndResend once the model loads. */
     private static volatile boolean pendingPropagateOnJoin = false;
-    // Check for model change every 10 ticks — model loads are rare, no need every tick
     private static int modelCheckCounter = 0;
     private static final int MODEL_CHECK_INTERVAL = 10;
 
@@ -69,39 +68,33 @@ public class TriggerEventHandler {
     private static int        lastHotbarSlot  = -1;
     private static ItemStack  lastMainItem    = ItemStack.EMPTY;
     private static ItemStack  lastOffItem     = ItemStack.EMPTY;
-    private static boolean    itemStateDirty  = true; // force first evaluation
+    private static boolean    itemStateDirty  = true;
 
     // ── Potion state ──────────────────────────────────────────────────────────
-    // Track the IDENTITY of active effects, not just count.
-    // Size-only tracking misses cases where one effect expires as another starts
-    // (count stays same but which effects are active changes → animation stuck).
-    private static final Set<MobEffect> lastActiveEffects = new HashSet<>();
+    private static final Set<Holder<MobEffect>> lastActiveEffects = new HashSet<>();
     private static boolean potionsDirty = true;
 
-    // ── Player stat state (health, food, air, xp, armor) ─────────────────────
+    // ── Player stat state ─────────────────────────────────────────────────────
     private static int lastHealthPct = -1, lastFoodPct = -1, lastAirPct = -1;
     private static int lastXpLevel = -1, lastArmorVal = -1;
 
     // ── Player boolean flags state ────────────────────────────────────────────
-    // Packed into a single int — 1 bit per flag, compared as one int per tick
     private static int lastPlayerFlags = -1;
-    // Bit positions
     private static final int F_SPRINTING  = 1, F_SNEAKING   = 2,  F_SWIMMING  = 4;
     private static final int F_UNDERWATER = 8, F_ELYTRA     = 16, F_IN_WATER  = 32;
     private static final int F_IN_LAVA    = 64, F_ON_FIRE   = 128, F_INVISIBLE = 256;
 
     // ── Biome/world state ─────────────────────────────────────────────────────
-    // Only re-check when player moves to a new XZ column
     private static int lastBiomeX = Integer.MIN_VALUE, lastBiomeZ = Integer.MIN_VALUE;
     private static int biomeSlowCounter = 0;
-    private static final int BIOME_FORCE_INTERVAL = 80; // force recheck every 4 sec
+    private static final int BIOME_FORCE_INTERVAL = 80;
 
     // ── Moon/night state ──────────────────────────────────────────────────────
     private static boolean lastWasNight = false;
     private static int     lastMoonPhase = -1;
     private static int     lastTimeOfDay = -1;
     private static int     moonSlowCounter = 0;
-    private static final int TIME_FORCE_INTERVAL = 100; // force recheck every 5 sec
+    private static final int TIME_FORCE_INTERVAL = 100;
 
     // ── Rain/thunder state ────────────────────────────────────────────────────
     private static int lastRaining = -1, lastThundering = -1;
@@ -109,18 +102,14 @@ public class TriggerEventHandler {
     // ─────────────────────────────────────────────────────────────────────────
 
     @SuppressWarnings("deprecation")
-    @SubscribeEvent
-    public static void onClientTick(TickEvent.ClientTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) return;
+    public static void tick() {
         if (CPMPlugin.clientApi == null) return;
 
         Minecraft mc = Minecraft.getInstance();
         LocalPlayer player = mc.player;
         if (player == null || mc.level == null) return;
 
-        // Retry pending peer color applications (gist models that weren't loaded yet)
         RgbReflectionHelper.tickPeerRetry();
-
 
         if (++modelCheckCounter >= MODEL_CHECK_INTERVAL) {
             modelCheckCounter = 0;
@@ -129,12 +118,9 @@ public class TriggerEventHandler {
 
         Level level = mc.level;
 
-        // ── Split: passive state (runs always) vs active state (skipped when GUI open) ──
-        // Potions, health, weather, and on_fire can change while a GUI is open.
-        // Items, movement, biome only change when the player is actively playing.
         boolean screenOpen = mc.screen != null;
 
-        // ── PLAYER STATS — can change passively (damage, eating, drowning) ─────
+        // ── PLAYER STATS ──────────────────────────────────────────────────────
         float maxHealth = player.getMaxHealth();
         int healthPct = maxHealth > 0 ? (int)(player.getHealth() / maxHealth * 100f) : 0;
         if (healthPct != lastHealthPct) { lastHealthPct = healthPct; send("health_pct", healthPct); }
@@ -153,8 +139,8 @@ public class TriggerEventHandler {
         int armorVal = player.getArmorValue();
         if (armorVal != lastArmorVal) { lastArmorVal = armorVal; send("armor_value", armorVal); }
 
-        // ── POTION EFFECTS — can change passively (effect expires, splash potion) ─
-        Set<MobEffect> currentEffects = new java.util.HashSet<>();
+        // ── POTION EFFECTS ────────────────────────────────────────────────────
+        Set<Holder<MobEffect>> currentEffects = new java.util.HashSet<>();
         for (var instance : player.getActiveEffects()) currentEffects.add(instance.getEffect());
         if (!currentEffects.equals(lastActiveEffects)) {
             lastActiveEffects.clear();
@@ -191,154 +177,141 @@ public class TriggerEventHandler {
             send("has_hero_of_village", hasEffect(player, MobEffects.HERO_OF_THE_VILLAGE));
             send("has_bad_omen",        hasEffect(player, MobEffects.BAD_OMEN));
 
-            // ── CUSTOM MODDED EFFECTS — from config/xtranims/effects/ ────────
             for (EffectTriggerLoader.EffectAnimation ea : EffectTriggerLoader.getAnimations()) {
                 send(ea.animationName, player.hasEffect(ea.effect) ? 1 : 0);
             }
         }
 
-        // ── ON FIRE — can be set passively (lava, fire block) ────────────────
-        {
-            int fireFlag = player.isOnFire() ? F_ON_FIRE : 0;
-            // We track on_fire separately here so it works while GUI is open.
-            // The full flags block below also handles it for the !screenOpen path,
-            // but send() deduplicates so double-sending is harmless.
-            send("is_on_fire", player.isOnFire() ? 1 : 0);
-        }
+        // ── ON FIRE ───────────────────────────────────────────────────────────
+        send("is_on_fire", player.isOnFire() ? 1 : 0);
 
-        // ── WEATHER — changes independently of player input ───────────────────
+        // ── WEATHER ───────────────────────────────────────────────────────────
         int raining    = level.isRaining()    ? 1 : 0;
         int thundering = level.isThundering() ? 1 : 0;
         if (raining    != lastRaining)    { lastRaining    = raining;    send("is_raining",    raining); }
         if (thundering != lastThundering) { lastThundering = thundering; send("is_thundering", thundering); }
 
         if (!screenOpen) {
-        // ── PLAYER FLAGS (sprinting, sneaking, etc.) ──────────────────────────
-        int flags = 0;
-        if (player.isSprinting())  flags |= F_SPRINTING;
-        if (player.isCrouching())  flags |= F_SNEAKING;
-        if (player.isSwimming())   flags |= F_SWIMMING;
-        if (player.isUnderWater()) flags |= F_UNDERWATER;
-        if (player.isFallFlying()) flags |= F_ELYTRA;
-        if (player.isInWater())    flags |= F_IN_WATER;
-        if (player.isInLava())     flags |= F_IN_LAVA;
-        if (player.isOnFire())     flags |= F_ON_FIRE;
-        if (player.isInvisible())  flags |= F_INVISIBLE;
-        if (flags != lastPlayerFlags) {
-            lastPlayerFlags = flags;
-            send("is_sprinting",  (flags & F_SPRINTING)  != 0 ? 1 : 0);
-            send("is_sneaking",   (flags & F_SNEAKING)   != 0 ? 1 : 0);
-            send("is_swimming",   (flags & F_SWIMMING)   != 0 ? 1 : 0);
-            send("is_underwater", (flags & F_UNDERWATER) != 0 ? 1 : 0);
-            send("is_elytra_fly", (flags & F_ELYTRA)     != 0 ? 1 : 0);
-            send("is_in_water",   (flags & F_IN_WATER)   != 0 ? 1 : 0);
-            send("is_in_lava",    (flags & F_IN_LAVA)    != 0 ? 1 : 0);
-            send("is_on_fire",    (flags & F_ON_FIRE)    != 0 ? 1 : 0);
-            send("is_invisible",  (flags & F_INVISIBLE)  != 0 ? 1 : 0);
-        }
-
-        // ── HOTBAR SLOT ───────────────────────────────────────────────────────
-        int hotbarSlot = player.getInventory().selected;
-        if (hotbarSlot != lastHotbarSlot) {
-            lastHotbarSlot = hotbarSlot;
-            send("hotbar_slot", hotbarSlot);
-            itemStateDirty = true; // main hand item may have changed
-        }
-
-        // ── ITEM STATE — only re-evaluate when item identity changes ──────────
-        ItemStack main = player.getMainHandItem();
-        ItemStack off  = player.getOffhandItem();
-
-        // Check identity by comparing item + count + tag (not full deep equals)
-        boolean mainChanged = !ItemStack.isSameItemSameTags(main, lastMainItem)
-                           || main.getCount() != lastMainItem.getCount();
-        boolean offChanged  = !ItemStack.isSameItemSameTags(off,  lastOffItem)
-                           || off.getCount()  != lastOffItem.getCount();
-
-        if (mainChanged || offChanged || itemStateDirty) {
-            itemStateDirty = false;
-            lastMainItem = main.copy();
-            lastOffItem  = off.copy();
-
-            String mainId = main.getItem().toString();
-            send("holding_sword",    mainId.contains("sword")    ? 1 : 0);
-            send("holding_bow",      main.is(Items.BOW)          ? 1 : 0);
-            send("holding_crossbow", main.is(Items.CROSSBOW)     ? 1 : 0);
-            send("holding_trident",  main.is(Items.TRIDENT)      ? 1 : 0);
-            send("holding_shield",   (main.is(Items.SHIELD) || off.is(Items.SHIELD)) ? 1 : 0);
-            send("holding_axe",      mainId.contains("_axe")     ? 1 : 0);
-            send("holding_pickaxe",  mainId.contains("pickaxe")  ? 1 : 0);
-            send("holding_shovel",   mainId.contains("shovel")   ? 1 : 0);
-            send("holding_hoe",      mainId.contains("_hoe")     ? 1 : 0);
-            send("holding_staff",    main.is(Items.STICK)        ? 1 : 0);
-
-            boolean isBook = main.is(Items.BOOK) || main.is(Items.WRITABLE_BOOK)
-                          || main.is(Items.WRITTEN_BOOK) || main.is(Items.ENCHANTED_BOOK);
-            send("holding_book", isBook ? 1 : 0);
-            boolean isTool = mainId.contains("pickaxe") || mainId.contains("_axe")
-                          || mainId.contains("shovel")  || mainId.contains("_hoe");
-            send("holding_tool",    isTool ? 1 : 0);
-            boolean isFood = !main.isEmpty() && main.getItem().getFoodProperties() != null;
-            send("holding_food",    isFood         ? 1 : 0);
-            send("main_hand_empty", main.isEmpty() ? 1 : 0);
-            send("off_hand_empty",  off.isEmpty()  ? 1 : 0);
-
-            // NBT triggers only re-evaluated when item changes
-            for (NbtTriggerLoader.ItemAnimation anim : NbtTriggerLoader.getAnimations()) {
-                ItemStack target = switch (anim.hand) {
-                    case MAIN -> main;
-                    case OFF  -> off;
-                    case BOTH -> anim.itemMatches(main) ? main
-                               : anim.itemMatches(off)  ? off
-                               : ItemStack.EMPTY;
-                };
-                boolean active = anim.itemMatches(target) && allConditionsPass(anim.conditions, target);
-                send(anim.animationName, active ? 1 : 0);
+            // ── PLAYER FLAGS ──────────────────────────────────────────────────
+            int flags = 0;
+            if (player.isSprinting())  flags |= F_SPRINTING;
+            if (player.isCrouching())  flags |= F_SNEAKING;
+            if (player.isSwimming())   flags |= F_SWIMMING;
+            if (player.isUnderWater()) flags |= F_UNDERWATER;
+            if (player.isFallFlying()) flags |= F_ELYTRA;
+            if (player.isInWater())    flags |= F_IN_WATER;
+            if (player.isInLava())     flags |= F_IN_LAVA;
+            if (player.isOnFire())     flags |= F_ON_FIRE;
+            if (player.isInvisible())  flags |= F_INVISIBLE;
+            if (flags != lastPlayerFlags) {
+                lastPlayerFlags = flags;
+                send("is_sprinting",  (flags & F_SPRINTING)  != 0 ? 1 : 0);
+                send("is_sneaking",   (flags & F_SNEAKING)   != 0 ? 1 : 0);
+                send("is_swimming",   (flags & F_SWIMMING)   != 0 ? 1 : 0);
+                send("is_underwater", (flags & F_UNDERWATER) != 0 ? 1 : 0);
+                send("is_elytra_fly", (flags & F_ELYTRA)     != 0 ? 1 : 0);
+                send("is_in_water",   (flags & F_IN_WATER)   != 0 ? 1 : 0);
+                send("is_in_lava",    (flags & F_IN_LAVA)    != 0 ? 1 : 0);
+                send("is_on_fire",    (flags & F_ON_FIRE)    != 0 ? 1 : 0);
+                send("is_invisible",  (flags & F_INVISIBLE)  != 0 ? 1 : 0);
             }
-        }
 
-// ── BIOME & WORLD — only when player moves to a new XZ column ─────────
-        int bx = (int)Math.floor(player.getX());
-        int bz = (int)Math.floor(player.getZ());
-        biomeSlowCounter++;
-        boolean biomeChanged = (bx != lastBiomeX || bz != lastBiomeZ);
-        if (biomeChanged || biomeSlowCounter >= BIOME_FORCE_INTERVAL) {
-            biomeSlowCounter = 0;
-            lastBiomeX = bx; lastBiomeZ = bz;
-
-            BlockPos pos = player.blockPosition();
-            var biomeHolder = level.getBiome(pos); // single call
-            float temp = biomeHolder.value().getBaseTemperature();
-            String biomeName = biomeHolder.unwrapKey()
-                    .map(k -> k.location().getPath()).orElse("");
-
-            send("biome_temperature",    Math.max(0, Math.min(100, (int)((temp + 0.5f) / 2.5f * 100f))));
-            send("biome_is_snowy",       temp < 0.15f                  ? 1 : 0);
-            send("biome_is_dry",         temp > 0.9f                   ? 1 : 0);
-            send("biome_is_ocean",       biomeName.contains("ocean")   ? 1 : 0);
-            send("biome_is_desert",      biomeName.contains("desert")  ? 1 : 0);
-            send("biome_is_forest",      biomeName.contains("forest")  ? 1 : 0);
-            send("biome_is_swamp",       biomeName.contains("swamp")   ? 1 : 0);
-            send("biome_is_jungle",      biomeName.contains("jungle")  ? 1 : 0);
-            send("biome_is_savanna",     biomeName.contains("savanna") ? 1 : 0);
-            send("biome_is_nether",      level.dimension() == Level.NETHER ? 1 : 0);
-            send("biome_is_the_end",     level.dimension() == Level.END    ? 1 : 0);
-            send("biome_is_underground", pos.getY() < 0 ? 1 : 0);
-            send("y_level", Math.max(0, Math.min(100, (int)((pos.getY() + 64f) / 384f * 100f))));
-
-            // ── CUSTOM MODDED BIOMES — from config/xtranims/biomes/ ──────────
-            String fullBiomeId = biomeHolder.unwrapKey()
-                    .map(k -> k.location().toString()).orElse("");
-            for (BiomeTriggerLoader.BiomeAnimation ba : BiomeTriggerLoader.getAnimations()) {
-                send(ba.animationName, ba.matches(fullBiomeId) ? 1 : 0);
+            // ── HOTBAR SLOT ───────────────────────────────────────────────────
+            int hotbarSlot = player.getInventory().selected;
+            if (hotbarSlot != lastHotbarSlot) {
+                lastHotbarSlot = hotbarSlot;
+                send("hotbar_slot", hotbarSlot);
+                itemStateDirty = true;
             }
-        }
 
+            // ── ITEM STATE ────────────────────────────────────────────────────
+            ItemStack main = player.getMainHandItem();
+            ItemStack off  = player.getOffhandItem();
+
+            boolean mainChanged = !ItemStack.isSameItemSameComponents(main, lastMainItem)
+                               || main.getCount() != lastMainItem.getCount();
+            boolean offChanged  = !ItemStack.isSameItemSameComponents(off,  lastOffItem)
+                               || off.getCount()  != lastOffItem.getCount();
+
+            if (mainChanged || offChanged || itemStateDirty) {
+                itemStateDirty = false;
+                lastMainItem = main.copy();
+                lastOffItem  = off.copy();
+
+                String mainId = main.getItem().toString();
+                send("holding_sword",    mainId.contains("sword")    ? 1 : 0);
+                send("holding_bow",      main.is(Items.BOW)          ? 1 : 0);
+                send("holding_crossbow", main.is(Items.CROSSBOW)     ? 1 : 0);
+                send("holding_trident",  main.is(Items.TRIDENT)      ? 1 : 0);
+                send("holding_shield",   (main.is(Items.SHIELD) || off.is(Items.SHIELD)) ? 1 : 0);
+                send("holding_axe",      mainId.contains("_axe")     ? 1 : 0);
+                send("holding_pickaxe",  mainId.contains("pickaxe")  ? 1 : 0);
+                send("holding_shovel",   mainId.contains("shovel")   ? 1 : 0);
+                send("holding_hoe",      mainId.contains("_hoe")     ? 1 : 0);
+                send("holding_staff",    main.is(Items.STICK)        ? 1 : 0);
+
+                boolean isBook = main.is(Items.BOOK) || main.is(Items.WRITABLE_BOOK)
+                              || main.is(Items.WRITTEN_BOOK) || main.is(Items.ENCHANTED_BOOK);
+                send("holding_book", isBook ? 1 : 0);
+                boolean isTool = mainId.contains("pickaxe") || mainId.contains("_axe")
+                              || mainId.contains("shovel")  || mainId.contains("_hoe");
+                send("holding_tool",    isTool ? 1 : 0);
+                boolean isFood = !main.isEmpty() && main.getItem().getFoodProperties(main, player) != null;
+                send("holding_food",    isFood         ? 1 : 0);
+                send("main_hand_empty", main.isEmpty() ? 1 : 0);
+                send("off_hand_empty",  off.isEmpty()  ? 1 : 0);
+
+                for (NbtTriggerLoader.ItemAnimation anim : NbtTriggerLoader.getAnimations()) {
+                    ItemStack target = switch (anim.hand) {
+                        case MAIN -> main;
+                        case OFF  -> off;
+                        case BOTH -> anim.itemMatches(main) ? main
+                                   : anim.itemMatches(off)  ? off
+                                   : ItemStack.EMPTY;
+                    };
+                    boolean active = anim.itemMatches(target) && allConditionsPass(anim.conditions, target);
+                    send(anim.animationName, active ? 1 : 0);
+                }
+            }
+
+            // ── BIOME & WORLD ─────────────────────────────────────────────────
+            int bx = (int)Math.floor(player.getX());
+            int bz = (int)Math.floor(player.getZ());
+            biomeSlowCounter++;
+            boolean biomeChanged = (bx != lastBiomeX || bz != lastBiomeZ);
+            if (biomeChanged || biomeSlowCounter >= BIOME_FORCE_INTERVAL) {
+                biomeSlowCounter = 0;
+                lastBiomeX = bx; lastBiomeZ = bz;
+
+                BlockPos pos = player.blockPosition();
+                var biomeHolder = level.getBiome(pos);
+                float temp = biomeHolder.value().getBaseTemperature();
+                String biomeName = biomeHolder.unwrapKey()
+                        .map(k -> k.location().getPath()).orElse("");
+
+                send("biome_temperature",    Math.max(0, Math.min(100, (int)((temp + 0.5f) / 2.5f * 100f))));
+                send("biome_is_snowy",       temp < 0.15f                  ? 1 : 0);
+                send("biome_is_dry",         temp > 0.9f                   ? 1 : 0);
+                send("biome_is_ocean",       biomeName.contains("ocean")   ? 1 : 0);
+                send("biome_is_desert",      biomeName.contains("desert")  ? 1 : 0);
+                send("biome_is_forest",      biomeName.contains("forest")  ? 1 : 0);
+                send("biome_is_swamp",       biomeName.contains("swamp")   ? 1 : 0);
+                send("biome_is_jungle",      biomeName.contains("jungle")  ? 1 : 0);
+                send("biome_is_savanna",     biomeName.contains("savanna") ? 1 : 0);
+                send("biome_is_nether",      level.dimension() == Level.NETHER ? 1 : 0);
+                send("biome_is_the_end",     level.dimension() == Level.END    ? 1 : 0);
+                send("biome_is_underground", pos.getY() < 0 ? 1 : 0);
+                send("y_level", Math.max(0, Math.min(100, (int)((pos.getY() + 64f) / 384f * 100f))));
+
+                String fullBiomeId = biomeHolder.unwrapKey()
+                        .map(k -> k.location().toString()).orElse("");
+                for (BiomeTriggerLoader.BiomeAnimation ba : BiomeTriggerLoader.getAnimations()) {
+                    send(ba.animationName, ba.matches(fullBiomeId) ? 1 : 0);
+                }
+            }
         } // end !screenOpen
 
-        // ── MOON / NIGHT — world time changes independently of player input ───
-        // Moved outside screenOpen guard so /time commands take effect immediately
-        // even while chat or another screen is open.
+        // ── MOON / NIGHT ──────────────────────────────────────────────────────
         moonSlowCounter++;
         long rawTime = level.getDayTime() % 24000;
         int timeOfDay = (int)(rawTime / 1000L);
@@ -362,125 +335,30 @@ public class TriggerEventHandler {
         }
     }
 
-    private static int hasEffect(LocalPlayer player, MobEffect effect) {
+    private static int hasEffect(LocalPlayer player, Holder<MobEffect> effect) {
         return player.hasEffect(effect) ? 1 : 0;
     }
 
-    // ─── MODEL CHANGE DETECTION ───────────────────────────────────────────────
+    // ─── SERVER JOIN ──────────────────────────────────────────────────────────
 
-    private static void checkForModelChange() {
-        try {
-            Player<?> cpmPlayer = MinecraftClientAccess.get().getCurrentClientPlayer();
-            if (cpmPlayer == null) { if (lastProfileId != null) resetAll(); return; }
-
-            ModelDefinition def = cpmPlayer.getModelDefinition();
-            if (def == null)       { if (lastProfileId != null) resetAll(); return; }
-
-            AnimationRegistry registry = def.getAnimations();
-            if (registry == null) return;
-
-            String profileId = registry.getProfileId();
-
-            // Check both profileId AND object identity — catches "Test Ingame" reloads
-            // where profileId stays the same but a new ModelDefinition object is created
-            if (Objects.equals(profileId, lastProfileId) && def == lastModelRef) return;
-
-            lastProfileId = profileId;
-            lastModelRef  = def;
-            resetStateFlags(); // force all state groups to re-evaluate next tick
-
-            // Build colon-animation reverse index: base → [full names]
-            Map<String, List<String>> index = new HashMap<>();
-            for (String name : registry.getCommandActionsMap().keySet()) {
-                if (!name.contains(":") || name.startsWith("rgb:")) continue;
-                int lastColon = name.lastIndexOf(':');
-                String afterLast = name.substring(lastColon + 1);
-                String fullName = (!afterLast.isEmpty() && afterLast.chars().allMatch(Character::isDigit))
-                        ? name.substring(0, lastColon) : name;
-                String base = fullName.substring(0, fullName.indexOf(':'));
-                index.computeIfAbsent(base, k -> new ArrayList<>()).add(fullName);
-            }
-            index.replaceAll((k, v) -> Collections.unmodifiableList(v));
-            colonIndex = Collections.unmodifiableMap(index);
-
-            // Get the .cpmmodel filename so colors are scoped per model file
-            String activeModel = null;
-            try {
-                activeModel = com.tom.cpm.shared.config.ModConfig.getCommonConfig()
-                        .getString(com.tom.cpm.shared.config.ConfigKeys.SELECTED_MODEL, null);
-                if (com.tom.cpm.shared.editor.TestIngameManager.TEST_MODEL_NAME.equals(activeModel)) {
-                    String old2 = com.tom.cpm.shared.config.ModConfig.getCommonConfig()
-                            .getString(com.tom.cpm.shared.config.ConfigKeys.SELECTED_MODEL_OLD, null);
-                    if (old2 != null && !old2.equals("~~VANILLA~~")) activeModel = old2;
-                }
-            } catch (Exception ignored) {}
-            RgbReflectionHelper.scanModel(def, registry, activeModel);
-
-            // Reload NBT animation definitions on every model change.
-            // The scan is trivially cheap (small text files) and ensures
-            // any .txt files added/edited without restarting Minecraft are
-            // picked up the next time the player loads into a world.
-            NbtTriggerLoader.load();
-            EffectTriggerLoader.load();
-            BiomeTriggerLoader.load();
-
-            // On first model load after join/relog, push colors to all viewers
-            if (pendingPropagateOnJoin) {
-                pendingPropagateOnJoin = false;
-                RgbReflectionHelper.applyColors();
-            }
-
-            XtraNimations.LOGGER.info("[XtraNimations] Model loaded (profile: {}). Colon anims: {}",
-                    profileId, colonIndex);
-
-
-
-        } catch (Exception ignored) {}
+    public static void onJoinServer() {
+        // Send hello via whichever platform's networking is active
+        if (RgbState.sendHelloHook != null) RgbState.sendHelloHook.run();
+        pendingPropagateOnJoin = true;
     }
 
-    private static void resetAll() {
-        colonIndex    = Collections.emptyMap();
-        lastProfileId = null;
-        lastModelRef  = null;
-        lastValues.clear();
-        resetStateFlags();
+    // ─── SERVER LEAVE ─────────────────────────────────────────────────────────
+
+    public static void onLeaveServer() {
         RgbReflectionHelper.reset();
+        pendingPropagateOnJoin = false;
     }
 
-    /** Forces all state groups to re-evaluate on next tick. */
-    private static void resetStateFlags() {
-        modelCheckCounter = MODEL_CHECK_INTERVAL; // check immediately on next tick
-        lastValues.clear();
-        lastPlayerFlags  = -1;
-        lastHealthPct    = lastFoodPct = lastAirPct = lastXpLevel = lastArmorVal = -1;
-        lastHotbarSlot   = -1;
-        lastMainItem     = ItemStack.EMPTY;
-        lastOffItem      = ItemStack.EMPTY;
-        itemStateDirty   = true;
-        lastActiveEffects.clear();
-        potionsDirty     = true;
-        lastBiomeX       = lastBiomeZ = Integer.MIN_VALUE;
-        biomeSlowCounter = BIOME_FORCE_INTERVAL; // force immediate biome check
-        lastWasNight     = false;
-        lastMoonPhase    = -1;
-        lastTimeOfDay    = -1;
-        moonSlowCounter  = TIME_FORCE_INTERVAL;
-        lastRaining      = lastThundering = -1;
-    }
+    // ─── ENTITY UNLOAD ───────────────────────────────────────────────────────
 
-    // (No per-frame render hook needed — RGB is applied by patching Animation interpolators directly)
-
-    // ─── SERVER JOIN — send capability probe ──────────────────────────────────
-
-    /**
-     * When the client finishes joining a server/world, send a HELLO to probe
-     * whether the server has XtraNimations. {@link RgbServerHandler#serverHasCapability}
-     * is set true only if the server replies with HELLO_ACK.
-     */
-    @SubscribeEvent
-    public static void onClientConnected(ClientPlayerNetworkEvent.LoggingIn event) {
-        RgbServerHandler.sendHello();
-        pendingPropagateOnJoin = true; // trigger a patchAndResend once model is ready
+    /** Called by platform bridge when a player entity is unloaded on the client side. */
+    public static void onClientEntityUnload(UUID entityUuid) {
+        RgbReflectionHelper.clearPeerPlayer(entityUuid);
     }
 
     // ─── SEND ─────────────────────────────────────────────────────────────────
@@ -505,13 +383,19 @@ public class TriggerEventHandler {
     private static boolean allConditionsPass(
             List<NbtTriggerLoader.NbtCondition> conditions, ItemStack stack) {
         if (stack.isEmpty()) return false;
-        CompoundTag root = stack.getTag();
-        if (root == null) return false;
+        // In 1.21, custom NBT lives in DataComponents.CUSTOM_DATA.
+        // We lazily fetch it only when a non-enchant condition needs it,
+        // so that HAS_ENCHANT conditions work even on items with no CUSTOM_DATA.
+        CustomData customData = stack.get(DataComponents.CUSTOM_DATA);
+        CompoundTag root = customData != null ? customData.getUnsafe() : null;
         for (NbtTriggerLoader.NbtCondition cond : conditions) {
             boolean pass;
             if (cond.op == NbtTriggerLoader.Op.HAS_ENCHANT) {
-                pass = hasEnchantment(root, cond.compareValue);
+                // Enchantments are now a DataComponent in 1.21 — read directly.
+                pass = hasEnchantment(stack, cond.compareValue);
             } else {
+                // All other conditions require CUSTOM_DATA NBT.
+                if (root == null) return false;
                 Tag resolved = walkNbtPath(root, cond.nbtPath);
                 if (resolved == null) return false;
                 pass = switch (cond.op) {
@@ -531,13 +415,30 @@ public class TriggerEventHandler {
         return true;
     }
 
-    private static boolean hasEnchantment(CompoundTag root, String enchantId) {
+    private static boolean hasEnchantment(ItemStack stack, String enchantId) {
+        // In 1.21, enchantments are data-driven (not in BuiltInRegistries).
+        // We check DataComponents.ENCHANTMENTS and STORED_ENCHANTMENTS by iterating
+        // the enchantment entries and comparing their registry key location string.
         if (!enchantId.contains(":")) enchantId = "minecraft:" + enchantId;
-        for (String listKey : new String[]{"Enchantments", "StoredEnchantments"}) {
-            if (!root.contains(listKey)) continue;
-            ListTag list = root.getList(listKey, Tag.TAG_COMPOUND);
-            for (int i = 0; i < list.size(); i++)
-                if (list.getCompound(i).getString("id").equalsIgnoreCase(enchantId)) return true;
+        final String targetId = enchantId.toLowerCase(java.util.Locale.ROOT);
+
+        net.minecraft.world.item.enchantment.ItemEnchantments enchantments =
+                stack.get(net.minecraft.core.component.DataComponents.ENCHANTMENTS);
+        if (enchantments != null) {
+            for (net.minecraft.core.Holder<net.minecraft.world.item.enchantment.Enchantment> h
+                    : enchantments.keySet()) {
+                if (h.unwrapKey().map(k -> k.location().toString().equalsIgnoreCase(targetId)).orElse(false))
+                    return true;
+            }
+        }
+        net.minecraft.world.item.enchantment.ItemEnchantments stored =
+                stack.get(net.minecraft.core.component.DataComponents.STORED_ENCHANTMENTS);
+        if (stored != null) {
+            for (net.minecraft.core.Holder<net.minecraft.world.item.enchantment.Enchantment> h
+                    : stored.keySet()) {
+                if (h.unwrapKey().map(k -> k.location().toString().equalsIgnoreCase(targetId)).orElse(false))
+                    return true;
+            }
         }
         return false;
     }
@@ -580,17 +481,93 @@ public class TriggerEventHandler {
         };
     }
 
-    @SubscribeEvent
-    public static void onClientDisconnected(ClientPlayerNetworkEvent.LoggingOut event) {
+    // ─── MODEL CHANGE DETECTION ───────────────────────────────────────────────
+
+    private static void checkForModelChange() {
+        try {
+            Player<?> cpmPlayer = MinecraftClientAccess.get().getCurrentClientPlayer();
+            if (cpmPlayer == null) { if (lastProfileId != null) resetAll(); return; }
+
+            ModelDefinition def = cpmPlayer.getModelDefinition();
+            if (def == null)       { if (lastProfileId != null) resetAll(); return; }
+
+            AnimationRegistry registry = def.getAnimations();
+            if (registry == null) return;
+
+            String profileId = registry.getProfileId();
+
+            if (Objects.equals(profileId, lastProfileId) && def == lastModelRef) return;
+
+            lastProfileId = profileId;
+            lastModelRef  = def;
+            resetStateFlags();
+
+            Map<String, List<String>> index = new HashMap<>();
+            for (String name : registry.getCommandActionsMap().keySet()) {
+                if (!name.contains(":") || name.startsWith("rgb:")) continue;
+                int lastColon = name.lastIndexOf(':');
+                String afterLast = name.substring(lastColon + 1);
+                String fullName = (!afterLast.isEmpty() && afterLast.chars().allMatch(Character::isDigit))
+                        ? name.substring(0, lastColon) : name;
+                String base = fullName.substring(0, fullName.indexOf(':'));
+                index.computeIfAbsent(base, k -> new ArrayList<>()).add(fullName);
+            }
+            index.replaceAll((k, v) -> Collections.unmodifiableList(v));
+            colonIndex = Collections.unmodifiableMap(index);
+
+            String activeModel = null;
+            try {
+                activeModel = com.tom.cpm.shared.config.ModConfig.getCommonConfig()
+                        .getString(com.tom.cpm.shared.config.ConfigKeys.SELECTED_MODEL, null);
+                if (com.tom.cpm.shared.editor.TestIngameManager.TEST_MODEL_NAME.equals(activeModel)) {
+                    String old2 = com.tom.cpm.shared.config.ModConfig.getCommonConfig()
+                            .getString(com.tom.cpm.shared.config.ConfigKeys.SELECTED_MODEL_OLD, null);
+                    if (old2 != null && !old2.equals("~~VANILLA~~")) activeModel = old2;
+                }
+            } catch (Exception ignored) {}
+            RgbReflectionHelper.scanModel(def, registry, activeModel);
+
+            NbtTriggerLoader.load();
+            EffectTriggerLoader.load();
+            BiomeTriggerLoader.load();
+
+            if (pendingPropagateOnJoin) {
+                pendingPropagateOnJoin = false;
+                RgbReflectionHelper.applyColors();
+            }
+
+            XtraNimations.LOGGER.info("[XtraNimations] Model loaded (profile: {}). Colon anims: {}",
+                    profileId, colonIndex);
+
+        } catch (Exception ignored) {}
+    }
+
+    private static void resetAll() {
+        colonIndex    = Collections.emptyMap();
+        lastProfileId = null;
+        lastModelRef  = null;
+        lastValues.clear();
+        resetStateFlags();
         RgbReflectionHelper.reset();
-        pendingPropagateOnJoin = false;
     }
 
-    @SubscribeEvent
-    public static void onEntityLeave(net.minecraftforge.event.entity.EntityLeaveLevelEvent event) {
-        if (!(event.getEntity() instanceof net.minecraft.world.entity.player.Player)) return;
-        if (event.getLevel().isClientSide())
-            RgbReflectionHelper.clearPeerPlayer(event.getEntity().getUUID());
+    private static void resetStateFlags() {
+        modelCheckCounter = MODEL_CHECK_INTERVAL;
+        lastValues.clear();
+        lastPlayerFlags  = -1;
+        lastHealthPct    = lastFoodPct = lastAirPct = lastXpLevel = lastArmorVal = -1;
+        lastHotbarSlot   = -1;
+        lastMainItem     = ItemStack.EMPTY;
+        lastOffItem      = ItemStack.EMPTY;
+        itemStateDirty   = true;
+        lastActiveEffects.clear();
+        potionsDirty     = true;
+        lastBiomeX       = lastBiomeZ = Integer.MIN_VALUE;
+        biomeSlowCounter = BIOME_FORCE_INTERVAL;
+        lastWasNight     = false;
+        lastMoonPhase    = -1;
+        lastTimeOfDay    = -1;
+        moonSlowCounter  = TIME_FORCE_INTERVAL;
+        lastRaining      = lastThundering = -1;
     }
-
 }

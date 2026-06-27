@@ -172,8 +172,22 @@ public class RgbColorScreen extends Screen {
     }
 
     // ── Rendering ─────────────────────────────────────────────────────────────
+
+    /**
+     * Override renderBackground to do nothing — we draw our own dark overlay in
+     * render() before the panel. This prevents the 1.21 blur shader from being
+     * applied twice (once by us, once by super.render()), which caused the screen
+     * to appear blurry when our panel was drawn before super.render().
+     */
+    @Override
+    public void renderBackground(GuiGraphics gfx, int mouseX, int mouseY, float partialTick) {
+        // Intentionally empty — our render() draws the overlay directly.
+    }
+
     @Override
     public void render(GuiGraphics gfx, int mouseX, int mouseY, float partialTick) {
+        // Draw the dark world overlay manually (replaces what renderBackground would do).
+        this.renderTransparentBackground(gfx);
         if (keys == null || keys.isEmpty()) {
             gfx.fill(0, 0, width, height, 0x88000000);
             gfx.drawCenteredString(font, "No RGB groups found in model.",

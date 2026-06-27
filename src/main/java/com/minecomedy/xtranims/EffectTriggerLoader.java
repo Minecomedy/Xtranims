@@ -1,8 +1,9 @@
 package com.minecomedy.xtranims;
 
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.core.Holder;
 import net.minecraft.world.effect.MobEffect;
-import net.minecraftforge.registries.ForgeRegistries;
+import net.minecraft.core.registries.BuiltInRegistries;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -72,9 +73,9 @@ public class EffectTriggerLoader {
      */
     public static class EffectAnimation {
         public final String animationName;
-        public final MobEffect effect;
+        public final Holder<MobEffect> effect;
 
-        public EffectAnimation(String animationName, MobEffect effect) {
+        public EffectAnimation(String animationName, Holder<MobEffect> effect) {
             this.animationName = animationName;
             this.effect        = effect;
         }
@@ -146,7 +147,7 @@ public class EffectTriggerLoader {
             return null;
         }
 
-        MobEffect effect = null;
+        Holder<MobEffect> effect = null;
         int lineNum = 0;
 
         for (String raw : lines) {
@@ -166,14 +167,14 @@ public class EffectTriggerLoader {
 
             if (key.equals("effect")) {
                 ResourceLocation rl = ResourceLocation.tryParse(val);
-                if (rl == null || !ForgeRegistries.MOB_EFFECTS.containsKey(rl)) {
+                if (rl == null || !BuiltInRegistries.MOB_EFFECT.containsKey(rl)) {
                     XtraNimations.LOGGER.warn(
                         "[XtraNimations] effects/{} line {}: unknown effect '{}' — skipping file " +
                         "(make sure the mod providing this effect is loaded)",
                         filename, lineNum, val);
                     return null;
                 }
-                effect = ForgeRegistries.MOB_EFFECTS.getValue(rl);
+                effect = BuiltInRegistries.MOB_EFFECT.getHolder(rl).orElse(null);
             }
             // Future keys can go here
         }
@@ -184,7 +185,7 @@ public class EffectTriggerLoader {
         }
 
         XtraNimations.LOGGER.info("[XtraNimations] Custom effect trigger '{}': effect={}",
-            animName, ForgeRegistries.MOB_EFFECTS.getKey(effect));
+            animName, BuiltInRegistries.MOB_EFFECT.getKey(effect.value()));
         return new EffectAnimation(animName, effect);
     }
 

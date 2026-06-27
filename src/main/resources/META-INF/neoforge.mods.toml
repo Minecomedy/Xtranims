@@ -1,0 +1,32 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="${license}"
+
+[[mods]]
+    modId="${mod_id}"
+    version="${version}"
+    displayName="${mod_name}"
+    description='''${description}'''
+    authors="${mod_author}"
+    credits="${credits}"
+
+[[dependencies.${mod_id}]]
+    modId="neoforge"
+    type="required"
+    versionRange="${neoforge_loader_version_range}"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="minecraft"
+    type="required"
+    versionRange="${minecraft_version_range}"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="cpm"
+    type="required"
+    versionRange="[0.6,)"
+    ordering="AFTER"
+    side="BOTH"
