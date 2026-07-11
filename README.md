@@ -11,12 +11,12 @@ An open-source Forge 1.20.1 addon for [Customizable Player Models (CPM)](https:/
 All triggers send a value of **0 or 1** (off/on) to CPM's animation system unless stated otherwise. Use them in the CPM editor with:
 
 ```
-pluginValue("trigger_name_here")
+trigger_name_here:namespace_here
 ```
 
 For example, to show a glowing effect only while the player is on fire:
 ```
-pluginValue("is_on_fire") > 0.5
+is_on_fire:I_AM_BURNING
 ```
 
 ---
@@ -291,6 +291,7 @@ tag.Mana > 50
 ### 🎨 RGB Color System
 
 XtraNimations includes an RGB color picker (open with the configured keybind) that lets you set custom colors for model parts. This system syncs colors to other players and persists per model file.
+You just need to create any part of your model with the effect `Color Effect` that can be found in the 'Effects' tab. Pick a color, but this color cannot be PURE WHITE or PURE BLACK! - Those colors touch some CPM internals and picking these colors might cause issues in your model!
 
 ---
 
